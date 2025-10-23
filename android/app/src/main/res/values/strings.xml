@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Verashield</string>
+    <string name="title_activity_main">Verashield</string>
+    <string name="package_name">com.verashield.app</string>
+    <string name="custom_url_scheme">com.verashield.app</string>
+</resources>

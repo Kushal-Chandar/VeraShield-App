@@ -1,0 +1,10 @@
+{
+  "appId": "com.verashield.app",
+  "appName": "Verashield",
+  "webDir": "dist",
+  "plugins": {
+    "SplashScreen": {
+      "launchAutoHide": false
+    }
+  }
+}

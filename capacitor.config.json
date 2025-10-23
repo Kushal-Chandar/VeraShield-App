@@ -1,0 +1,53 @@
+{
+  "appId": "com.verashield.app",
+  "appName": "Verashield",
+  "webDir": "dist",
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 1000,
+      "launchAutoHide": true,
+      "backgroundColor": "#10b981",
+      "androidSplashResourceName": "splash",
+      "androidScaleType": "CENTER_CROP",
+      "showSpinner": false,
+      "splashFullScreen": false,
+      "splashImmersive": false
+    },
+    "StatusBar": {
+      "style": "DEFAULT",
+      "backgroundColor": "#f0f9ff",
+      "overlaysWebView": false
+    },
+    "Keyboard": {
+      "resize": "native"
+    },
+    "BluetoothLe": {
+      "displayStrings": {
+        "scanning": "Scanning for devices...",
+        "cancel": "Cancel",
+        "availableDevices": "Available devices",
+        "noDeviceFound": "No device found"
+      }
+    }
+  },
+  "android": {
+    "allowMixedContent": true,
+    "captureInput": true,
+    "webContentsDebuggingEnabled": true,
+    "permissions": [
+      "android.permission.BLUETOOTH",
+      "android.permission.BLUETOOTH_ADMIN",
+      "android.permission.ACCESS_COARSE_LOCATION",
+      "android.permission.ACCESS_FINE_LOCATION",
+      "android.permission.BLUETOOTH_SCAN",
+      "android.permission.BLUETOOTH_CONNECT",
+      "android.permission.BLUETOOTH_ADVERTISE"
+    ]
+  },
+  "ios": {
+    "permissions": [
+      "NSBluetoothAlwaysUsageDescription",
+      "NSBluetoothPeripheralUsageDescription"
+    ]
+  }
+}
