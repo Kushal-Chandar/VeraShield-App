@@ -33,16 +33,16 @@ const TimeSettings = ({ currentTime, onTimeChange }: TimeSettingsProps) => {
   const displayTimerRef = useRef<number | null>(null);
   const deviceTimerRef = useRef<number | null>(null);
 
+  // NEW: if user set time while disconnected, push once on next connect
+  const pendingManualPushRef = useRef(false);
+
   const { toast } = useToast();
 
   // keep connection state fresh
   useEffect(() => {
     const unsubscribe = bluetoothService.onConnectionChange?.((c) => setIsConnected(c));
-    // also set initial state in case onConnectionChange fires late
     setIsConnected(bluetoothService.isDeviceConnected());
-    return () => {
-      try { unsubscribe?.(); } catch { }
-    };
+    return () => { try { unsubscribe?.(); } catch { } };
   }, []);
 
   // keep local manual input synced if parent currentTime changes (and we're auto-syncing)
@@ -55,9 +55,7 @@ const TimeSettings = ({ currentTime, onTimeChange }: TimeSettingsProps) => {
     if (!isAutoSync) return;
     displayTimerRef.current = window.setInterval(() => {
       const now = new Date().toLocaleTimeString("en-US", {
-        hour12: false,
-        hour: "2-digit",
-        minute: "2-digit",
+        hour12: false, hour: "2-digit", minute: "2-digit",
       });
       onTimeChange(now);       // parent display state
       setManualTime(now);      // keep input in sync
@@ -73,42 +71,51 @@ const TimeSettings = ({ currentTime, onTimeChange }: TimeSettingsProps) => {
     async function pushOnce() {
       if (!isConnected) return;
       try {
-        const now = new Date(); // push exact current device time
-        await bluetoothService.syncTimeFromDate(now);
-      } catch (e) {
-        // don't spam errors; user will see toast when toggling/manual set
+        await bluetoothService.syncTimeFromDate(new Date()); // exact current time
+      } catch {
+        // silent; we retry on the next tick
       }
     }
 
     if (isAutoSync) {
-      // push immediately once (best effort) when toggled ON
-      void pushOnce();
-
-      deviceTimerRef.current = window.setInterval(() => {
-        void pushOnce();
-      }, DEVICE_SYNC_TICK_MS) as unknown as number;
-
+      void pushOnce(); // push immediately once when toggled ON / on connect
+      deviceTimerRef.current = window.setInterval(() => { void pushOnce(); }, DEVICE_SYNC_TICK_MS) as unknown as number;
       return () => {
         if (deviceTimerRef.current) window.clearInterval(deviceTimerRef.current);
         deviceTimerRef.current = null;
       };
     }
 
-    // if auto-sync is OFF, ensure interval is cleared
     if (deviceTimerRef.current) window.clearInterval(deviceTimerRef.current);
     deviceTimerRef.current = null;
   }, [isAutoSync, isConnected]);
 
+  // NEW: if in manual mode and a manual push was queued while offline, push once on connect
+  useEffect(() => {
+    async function pushIfPending() {
+      if (!isAutoSync && isConnected && pendingManualPushRef.current) {
+        try {
+          const sanitized = timeValidation.sanitizeTimeInput(manualTime);
+          if (timeValidation.isValidTimeFormat(sanitized) && timeValidation.isReasonableTime(sanitized)) {
+            const target = applyTimeToDate(new Date(), sanitized);
+            await bluetoothService.syncTimeFromDate(target);
+            toast({ title: "Time Synced", description: `Device time set to ${sanitized}` });
+          }
+        } catch (e: any) {
+          toast({ title: "Sync Failed", description: e?.message || "Could not write time to device", variant: "destructive" });
+        } finally {
+          pendingManualPushRef.current = false;
+        }
+      }
+    }
+    void pushIfPending();
+  }, [isConnected, isAutoSync, manualTime, toast]);
+
   const handleManualTimeSet = async () => {
-    // Validate and sanitize time input
     const sanitizedTime = timeValidation.sanitizeTimeInput(manualTime);
 
     if (!timeValidation.isValidTimeFormat(sanitizedTime) || !timeValidation.isReasonableTime(sanitizedTime)) {
-      toast({
-        title: "Invalid Time",
-        description: "Please enter a valid time in HH:MM format",
-        variant: "destructive",
-      });
+      toast({ title: "Invalid Time", description: "Please enter a valid time in HH:MM format", variant: "destructive" });
       return;
     }
 
@@ -117,60 +124,36 @@ const TimeSettings = ({ currentTime, onTimeChange }: TimeSettingsProps) => {
     setIsAutoSync(false); // manual mode
 
     if (!isConnected) {
-      toast({
-        title: "Time Updated Locally",
-        description: `Will sync to device when connected`,
-      });
+      pendingManualPushRef.current = true; // queue a one-shot sync on next connection
+      toast({ title: "Time Updated Locally", description: "Will sync to device when connected" });
       return;
     }
 
     try {
       const target = applyTimeToDate(new Date(), sanitizedTime);
       await bluetoothService.syncTimeFromDate(target);
-      toast({
-        title: "Time Synced",
-        description: `Device time set to ${sanitizedTime}`,
-      });
+      toast({ title: "Time Synced", description: `Device time set to ${sanitizedTime}` });
     } catch (e: any) {
-      toast({
-        title: "Sync Failed",
-        description: e?.message || "Could not write time to device",
-        variant: "destructive",
-      });
+      toast({ title: "Sync Failed", description: e?.message || "Could not write time to device", variant: "destructive" });
     }
   };
 
   const handleAutoSync = async () => {
     setIsAutoSync(true);
 
-    // update display immediately
-    const nowStr = new Date().toLocaleTimeString("en-US", {
-      hour12: false,
-      hour: "2-digit",
-      minute: "2-digit",
-    });
+    const nowStr = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" });
     onTimeChange(nowStr);
     setManualTime(nowStr);
 
-    // best-effort push right now if connected
     if (isConnected) {
       try {
         await bluetoothService.syncTimeFromDate(new Date());
-        toast({
-          title: "Auto Sync Enabled",
-          description: "Clock will auto-sync to device periodically",
-        });
+        toast({ title: "Auto Sync Enabled", description: "Clock will auto-sync to device periodically" });
       } catch (e: any) {
-        toast({
-          title: "Auto Sync Enabled (device not updated)",
-          description: e?.message || "Will retry periodically",
-        });
+        toast({ title: "Auto Sync Enabled (device not updated)", description: e?.message || "Will retry periodically" });
       }
     } else {
-      toast({
-        title: "Auto Sync Enabled",
-        description: "Will sync automatically when the device connects",
-      });
+      toast({ title: "Auto Sync Enabled", description: "Will sync automatically when the device connects" });
     }
   };
 
@@ -199,9 +182,7 @@ const TimeSettings = ({ currentTime, onTimeChange }: TimeSettingsProps) => {
 
         {/* Manual Time Setting */}
         <div className="space-y-3">
-          <Label htmlFor="manual-time" className="text-sm font-medium">
-            Set Time Manually:
-          </Label>
+          <Label htmlFor="manual-time" className="text-sm font-medium">Set Time Manually:</Label>
           <div className="flex gap-2">
             <Input
               id="manual-time"

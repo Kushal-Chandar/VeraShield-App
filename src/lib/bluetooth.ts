@@ -63,7 +63,7 @@ export interface BluetoothService {
     readSchedule(): Promise<ParsedSchedule>;
     writeSchedule(entries: ScheduleEntry[]): Promise<void>;
     readStatistics(start: number, window: number): Promise<ParsedStats>;
-    testSpray(state?: number): Promise<void>;
+    remoteSpray(state?: number): Promise<void>;
     getBatteryLevel(): Promise<number>;
     getDeviceInfo(): Promise<DeviceInfo>;
     getDeviceServices(): Promise<any>;
@@ -114,6 +114,9 @@ class MachharBluetoothServiceImpl implements BluetoothService {
     private connectionListeners: Array<(connected: boolean) => void> = [];
     private readonly scanTimeoutMs = 10_000;
     private readonly connectTimeoutMs = 15_000;
+    private currentMtu: number | undefined;
+    /** For writes: maximum payload we should send (ATT payload = MTU-3) */
+    private currentPayloadLimit: number | undefined;
 
     async initialize(): Promise<void> {
         if (this.initialized) return;
@@ -161,32 +164,60 @@ class MachharBluetoothServiceImpl implements BluetoothService {
 
     async scanForDevices(): Promise<Array<{ name: string; id: string; rssi?: number }>> {
         await this.initialize();
-        const results: Array<{ name: string; id: string; rssi?: number }> = [];
+
+        const WANT = "MACHHAR";
+        const results = new Map<string, { id: string; name: string; rssi?: number }>();
         let active = true;
+
+        const getName = (res: any): string | undefined => {
+            return res?.localName ?? res?.name ?? res?.device?.name ?? res?.device?.localName ?? undefined;
+        };
+
         try {
             await BleClient.requestLEScan({ allowDuplicates: false }, (res) => {
                 if (!active || !res || !res.device) return;
-                const id = (res.device.deviceId ?? res.device.id ?? res.device.identifier) as string;
-                const name = res.device.name ?? res.device.localName ?? "Unknown";
-                if (!results.find((d) => d.id === id)) results.push({ id, name, rssi: res.rssi });
+
+                const id: string = (res.device.deviceId ?? (res.device as any).id ?? (res.device as any).identifier) as string;
+
+                const rawName = getName(res);
+                if (!rawName) return; // skip nameless advertisements
+
+                // Filter to devices whose name includes "MACHHAR"
+                if (!rawName.toUpperCase().includes(WANT)) return;
+
+                const prev = results.get(id);
+                const entry = {
+                    id,
+                    name: rawName,
+                    rssi: res.rssi ?? prev?.rssi,
+                };
+
+                if (!prev || (typeof res.rssi === "number" && (prev.rssi ?? -999) < res.rssi)) {
+                    results.set(id, entry);
+                }
             });
+
             await sleep(this.scanTimeoutMs);
         } finally {
             active = false;
             try {
                 await BleClient.stopLEScan();
             } catch {
-                // ignore
+                // ignore stop errors
             }
         }
-        results.sort((a, b) => (b.rssi ?? -100) - (a.rssi ?? -100));
-        return results;
+
+        const out = Array.from(results.values());
+        out.sort((a, b) => (b.rssi ?? -100) - (a.rssi ?? -100));
+        return out;
     }
 
     async isMachharDevice(deviceId: string): Promise<boolean> {
         try {
             const services = await BleClient.getServices(deviceId);
-            return services.some((s) => (s.uuid ?? "").toString().toLowerCase() === MACHHAR_SERVICE_UUID.toLowerCase());
+            return services.some(
+                (s) => (s.uuid ?? "").toString().toLowerCase() === MACHHAR_SERVICE_UUID.toLowerCase()
+            );
         } catch {
             return false;
         }
@@ -200,7 +231,7 @@ class MachharBluetoothServiceImpl implements BluetoothService {
         }
 
         await withTimeout(
-            BleClient.connect(device.id, (disconnectedDeviceId?: string) => {
+            BleClient.connect(device.id, (_disconnectedDeviceId?: string) => {
                 // disconnect callback
                 this.connected = null;
                 this.notifyConnectionChange();
@@ -220,18 +251,36 @@ class MachharBluetoothServiceImpl implements BluetoothService {
             await this.disconnect().catch(() => { });
             throw new Error("Machhar service not found on device");
         }
+
+        this.currentMtu = 23; // default ATT MTU if request fails
+        try {
+            // Some plugin versions expose requestMtu(deviceId, mtu)
+            // @ts-ignore
+            if (typeof (BleClient as any).requestMtu === "function") {
+                // @ts-ignore
+                const wanted = 247; // common max on Android
+                // @ts-ignore
+                await (BleClient as any).requestMtu(device.id, wanted);
+                // @ts-ignore: if getMtu exists, prefer real value
+                if (typeof (BleClient as any).getMtu === "function") {
+                    // @ts-ignore
+                    this.currentMtu = await (BleClient as any).getMtu(device.id);
+                } else {
+                    // assume success if no getter (platforms often grant ~247)
+                    this.currentMtu = wanted;
+                }
+            }
+        } catch {
+            // keep default 23 if request fails
+        }
+        this.currentPayloadLimit = Math.max(20, (this.currentMtu ?? 23) - 3); // ATT payload = MTU-3
     }
 
     async disconnect(): Promise<void> {
         if (!this.connected) return;
         const id = this.connected.deviceId;
         try {
-            // best-effort: write a harmless byte to remote-spray to let FW know (optional)
-            try {
-                const dv = numbersToDataView([0xff]);
-                await BleClient.write(id, MACHHAR_SERVICE_UUID, MACHHAR_REMOTE_SPRAY_UUID, dv);
-                await sleep(100);
-            } catch { }
+            // Removed: writing 0xFF to remote-spray here could trigger an unintended action.
             await BleClient.disconnect(id);
         } catch {
             // ignore
@@ -250,14 +299,14 @@ class MachharBluetoothServiceImpl implements BluetoothService {
         return BleClient.getServices(this.connected.deviceId);
     }
 
-    private ensureConnected(): asserts this is MachharBluetoothServiceImpl & { connected: { deviceId: string } } {
+    private ensureConnected(): void {
         if (!this.connected) throw new Error("Device not connected");
     }
 
     private async readCharacteristic(service: string, characteristic: string): Promise<number[]> {
         this.ensureConnected();
         try {
-            const dv = await BleClient.read(this.connected.deviceId, service, characteristic);
+            const dv = await BleClient.read(this.connected!.deviceId, service, characteristic);
             return dataViewToNumbers(dv);
         } catch (err) {
             // clear state if read fails due to disconnect
@@ -271,7 +320,7 @@ class MachharBluetoothServiceImpl implements BluetoothService {
         this.ensureConnected();
         try {
             const dv = numbersToDataView(bytes);
-            await BleClient.write(this.connected.deviceId, service, characteristic, dv);
+            await BleClient.write(this.connected!.deviceId, service, characteristic, dv);
         } catch (err) {
             this.connected = null;
             this.notifyConnectionChange();
@@ -281,31 +330,40 @@ class MachharBluetoothServiceImpl implements BluetoothService {
 
     private parseSchedulePayload(raw: number[]): ParsedSchedule {
         if (!Array.isArray(raw) || raw.length < 1) return { count: 0, entries: [] };
-        const countFromRaw = raw[0] ?? 0;
+        let countFromRaw = raw[0] ?? 0;
         const entries: ScheduleEntry[] = [];
-        for (let i = 0; i < countFromRaw; i++) {
+
+        // Expected length by count
+        const expectedLen = 1 + countFromRaw * 8;
+        const arrivedEntries = Math.max(0, Math.floor((raw.length - 1) / 8));
+        const n = Math.min(countFromRaw, arrivedEntries);
+
+        for (let i = 0; i < n; i++) {
             const base = 1 + i * 8;
-            if (base + 8 > raw.length) break;
             const time7 = raw.slice(base, base + 7);
             const intensity2b = raw[base + 7] & 0x03;
             entries.push({ time7, intensity2b });
         }
-        return { count: countFromRaw, entries };
+        return { count: n, entries };
     }
 
     private parseStatsPayload(raw: number[]): ParsedStats {
         if (!Array.isArray(raw) || raw.length < 2) return { total: 0, window: 0, entries: [] };
         const total = raw[0] ?? 0;
         const windowFromRaw = raw[1] ?? 0;
+
+        // How many full 8-byte entries actually arrived?
+        const arrived = Math.max(0, Math.floor((raw.length - 2) / 8));
+        const n = Math.min(windowFromRaw, arrived);
+
         const entries: StatsEntry[] = [];
-        for (let i = 0; i < windowFromRaw; i++) {
+        for (let i = 0; i < n; i++) {
             const base = 2 + i * 8;
-            if (base + 8 > raw.length) break;
             const time7 = raw.slice(base, base + 7);
             const intensity2b = raw[base + 7] & 0x03;
             entries.push({ time7, intensity2b });
         }
-        return { total, window: windowFromRaw, entries };
+        return { total, window: n, entries };
     }
 
     async syncTimeFromDate(d: Date): Promise<void> {
@@ -323,7 +381,11 @@ class MachharBluetoothServiceImpl implements BluetoothService {
 
     async syncTimeRaw(time7: number[]): Promise<void> {
         if (!Array.isArray(time7) || time7.length !== 7) throw new Error("time7 must be array of 7 bytes");
-        await this.writeCharacteristic(MACHHAR_SERVICE_UUID, MACHHAR_GADI_SYNC_UUID, time7.map((n) => clamp(n, 0, 255)));
+        await this.writeCharacteristic(
+            MACHHAR_SERVICE_UUID,
+            MACHHAR_GADI_SYNC_UUID,
+            time7.map((n) => clamp(n, 0, 255))
+        );
     }
 
     async readSchedule(): Promise<ParsedSchedule> {
@@ -333,27 +395,69 @@ class MachharBluetoothServiceImpl implements BluetoothService {
 
     async writeSchedule(entries: ScheduleEntry[]): Promise<void> {
         if (!Array.isArray(entries)) throw new Error("entries must be array");
-        const count = clamp(entries.length, 0, 255);
-        const payload: number[] = [count];
+
+        const count = Math.min(255, entries.length);
+        const bytes: number[] = [count];
         for (let i = 0; i < count; i++) {
             const e = entries[i];
-            if (!Array.isArray(e.time7) || e.time7.length !== 7) throw new Error(`entry[${i}].time7 must be 7 bytes`);
-            const inten = e.intensity2b & 0x03;
-            payload.push(...e.time7.map((n) => clamp(n, 0, 255)), inten);
+            if (!Array.isArray(e.time7) || e.time7.length !== 7) {
+                throw new Error(`entry[${i}].time7 must be 7 bytes`);
+            }
+            bytes.push(
+                e.time7[0] & 0xff,
+                e.time7[1] & 0xff,
+                e.time7[2] & 0xff,
+                e.time7[3] & 0xff,
+                e.time7[4] & 0xff,
+                e.time7[5] & 0xff,
+                e.time7[6] & 0xff,
+                e.intensity2b & 0x03
+            );
         }
-        await this.writeCharacteristic(MACHHAR_SERVICE_UUID, MACHHAR_SCHEDULING_UUID, payload);
+
+        // Firmware demands a single write that fits <= (MTU-3)
+        const payloadMax = Math.max(20, (this.currentPayloadLimit ?? ((this.currentMtu ?? 23) - 3)));
+        if (bytes.length > payloadMax) {
+            const maxEntries = Math.max(0, Math.floor((payloadMax - 1) / 8)); // 1 hdr + N*8
+            throw new Error(
+                `Schedule too large for current MTU (${this.currentMtu ?? 23}). ` +
+                `Max entries: ${maxEntries}, attempted: ${count}. ` +
+                `Reduce the number of entries or reconnect to negotiate a larger MTU.`
+            );
+        }
+
+        await this.writeCharacteristic(MACHHAR_SERVICE_UUID, MACHHAR_SCHEDULING_UUID, bytes);
     }
 
     async readStatistics(start: number, window: number): Promise<ParsedStats> {
-        // write control then read
+        // NOTE:
+        // - Window 0 is allowed as a FW-side "max allowed" shortcut.
+        // - Otherwise we cap to 1..63 and, optionally, to a single-PDU fit given current MTU.
+
         const startB = clamp(start, 0, 255);
-        const winB = clamp(window, 1, 63);
+
+        const mtu = this.currentMtu ?? 23;
+        // For a single Read Characteristic Value PDU, max payload is (MTU - 1).
+        // With a 2-byte header, entries are 8 bytes each.
+        const maxEntriesOneRead = Math.max(0, Math.floor(((mtu - 1) - 2) / 8));
+
+        let winB: number;
+        if (window === 0) {
+            // Let FW decide maximum (still capped internally to <=63 and available entries).
+            winB = 0;
+        } else {
+            // Cap to [1..63]; also optionally cap to what fits in one read if that limit is >0.
+            const capped = clamp(window, 1, 63);
+            winB = maxEntriesOneRead > 0 ? clamp(Math.min(capped, maxEntriesOneRead), 1, 63) : capped;
+        }
+
+        // write control then read
         await this.writeCharacteristic(MACHHAR_SERVICE_UUID, MACHHAR_STATISTICS_UUID, [startB, winB]);
         const raw = await this.readCharacteristic(MACHHAR_SERVICE_UUID, MACHHAR_STATISTICS_UUID);
         return this.parseStatsPayload(raw);
     }
 
-    async testSpray(state: number = 0x01): Promise<void> {
+    async remoteSpray(state: number = 0x01): Promise<void> {
         const b = [state & 0x03];
         await this.writeCharacteristic(MACHHAR_SERVICE_UUID, MACHHAR_REMOTE_SPRAY_UUID, b);
     }
@@ -361,7 +465,7 @@ class MachharBluetoothServiceImpl implements BluetoothService {
     async getBatteryLevel(): Promise<number> {
         this.ensureConnected();
         try {
-            const dv = await BleClient.read(this.connected.deviceId, BATTERY_SERVICE_UUID, BATTERY_LEVEL_UUID);
+            const dv = await BleClient.read(this.connected!.deviceId, BATTERY_SERVICE_UUID, BATTERY_LEVEL_UUID);
             const arr = dataViewToNumbers(dv);
             const level = arr[0] ?? 0;
             return clamp(level, 0, 100);
@@ -375,7 +479,7 @@ class MachharBluetoothServiceImpl implements BluetoothService {
     private async readText(service: string, characteristic: string, fallback = "Unknown"): Promise<string> {
         this.ensureConnected();
         try {
-            const dv = await BleClient.read(this.connected.deviceId, service, characteristic);
+            const dv = await BleClient.read(this.connected!.deviceId, service, characteristic);
             const arr = dataViewToNumbers(dv);
             const str = String.fromCharCode(...arr).trim();
             return str || fallback;

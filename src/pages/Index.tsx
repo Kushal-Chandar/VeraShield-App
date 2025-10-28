@@ -1,45 +1,51 @@
-import { useState, useMemo, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { useState, useEffect } from "react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { BluetoothIcon, Clock, Zap, Info, HelpCircle, User, Settings, Droplets } from "lucide-react";
-import BluetoothService from "@/services/bluetooth/bluetoothService"; // 👈 default import (no braces)
-import { useToast } from "@/hooks/use-toast";
-
+import { Zap, HelpCircle } from "lucide-react";
 import BluetoothPairing from "@/components/BluetoothPairing";
-import Troubleshoot from "@/components/Troubleshoot";
+import BluetoothService, { DeviceData } from "@/services/bluetooth/bluetoothService";
 import TimeSettings from "@/components/TimeSettings";
+import Troubleshoot from "@/pages/Troubleshoot";
+import { useToast } from "@/hooks/use-toast";
 import DeviceStatusCard from "@/components/DeviceStatusCard";
+import RemoteSprayControl from "@/components/RemoteSprayControl";
+import SmartSchedulingPanel from "@/components/SmartSchedulingPanel";
 
 const Index = () => {
-  const [isConnected, setIsConnected] = useState(false);
+  const [isConnected, setIsConnected] = useState<boolean>(false);
+  // const [isConnected, setIsConnected] = useState(true);
   const [deviceName, setDeviceName] = useState("");
   const [currentTime, setCurrentTime] = useState(() =>
     new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" })
   );
   const [deviceData, setDeviceData] = useState<DeviceData>({});
-  const navigate = useNavigate();
   const { toast } = useToast();
 
-  const bluetoothService = BluetoothService; // 👈 use it directly — it's already a singleton
+  const bluetoothService = BluetoothService;
+
+  useEffect(() => {
+    let mounted = true;
+    bluetoothService
+      .isDeviceConnected()
+      .then((connected) => {
+        if (mounted) setIsConnected(connected);
+      })
+      .catch(() => {
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     const loadDeviceData = async () => {
-      const data = bluetoothService.getDeviceData();
+      const data = await bluetoothService.readDeviceData();
       setDeviceData(data);
     };
     loadDeviceData();
   }, [isConnected]);
 
-  const handleSprayNow = () => {
-    toast({
-      title: "Spray Activated",
-      description: "Starting spray cycle now",
-    });
-    navigate("/active-spray");
-  };
 
   const handleConnect = async (name: string) => {
     setIsConnected(true);
@@ -55,7 +61,7 @@ const Index = () => {
     } catch (error) {
       toast({
         title: "Connection Warning",
-        description: "Connected but couldn't read device data",
+        description: `${error} Connected but couldn't read device data`,
         variant: "destructive",
       });
     }
@@ -96,14 +102,6 @@ const Index = () => {
               isConnected={isConnected}
               deviceName={deviceName}
               batteryLevel={deviceData?.batteryLevel}
-              onRefresh={async () => {
-                // optional: wire into your existing refresh logic
-                if (isConnected) {
-                  await loadDeviceData?.();
-                } else {
-                  await checkConnectionAndLoadData?.();
-                }
-              }}
             />
 
             {/* Quick Actions - Only show when connected */}
@@ -116,12 +114,7 @@ const Index = () => {
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-3">
-                  <Button
-                    className="w-full bg-gradient-to-r from-blue-500 to-teal-500 hover:from-blue-600 hover:to-teal-600"
-                    onClick={handleSprayNow}
-                  >
-                    Spray Now
-                  </Button>
+                  <RemoteSprayControl />
                   <Button
                     variant="outline"
                     className="w-full"
@@ -142,36 +135,8 @@ const Index = () => {
               currentTime={currentTime}
               onTimeChange={setCurrentTime}
             />
-            {/* Control Features - Always visible below device status */}
-            <Card className="bg-white/80 backdrop-blur-sm border-0 shadow-lg">
-              <CardHeader>
-                <CardTitle className="text-lg flex items-center gap-2">
-                  <Settings className="w-5 h-5 text-purple-500" />
-                  Control Features
-                </CardTitle>
-                <CardDescription>
-                  Access spray control and scheduling features
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <Button
-                  className="w-full bg-gradient-to-r from-green-500 to-teal-500 hover:from-green-600 hover:to-teal-600"
-                  onClick={() => navigate("/smart-scheduling")}
-                  disabled={!isConnected}
-                >
-                  <Clock className="w-4 h-4 mr-2" />
-                  Smart Scheduling
-                </Button>
-                <Button
-                  className="w-full bg-gradient-to-r from-orange-500 to-red-500 hover:from-orange-600 hover:to-red-600"
-                  onClick={() => navigate("/intensity-control")}
-                  disabled={!isConnected}
-                >
-                  <Droplets className="w-4 h-4 mr-2" />
-                  Spray Intensity
-                </Button>
-              </CardContent>
-            </Card>
+
+            <SmartSchedulingPanel defaultTime="20:00" />
           </TabsContent>
 
           <TabsContent value="troubleshoot">
