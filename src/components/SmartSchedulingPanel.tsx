@@ -30,11 +30,17 @@ function toNextOccurrence(hhmm: string): Date {
   return d;
 }
 
+const MONTH_IS_ZERO_BASED = true; // set to false if FW wants 1..12
+
 function dateToTime7(d: Date): number[] {
-  const year7 = Math.max(0, Math.min(255, d.getFullYear() - 2000));
-  // [year, mon(0..11), mday, hour, min, sec, wday]
-  return [year7, d.getMonth(), d.getDate(), d.getHours(), d.getMinutes(), d.getSeconds(), d.getDay()];
+  const year7 = Math.max(0, Math.min(255, d.getFullYear() - 1900));
+  const mon = d.getMonth(); // 0..11
+  const monProto = MONTH_IS_ZERO_BASED ? mon : mon + 1;
+
+  // FW order: [sec, min, hour, mday, wday, month, year]
+  return [d.getSeconds(), d.getMinutes(), d.getHours(), d.getDate(), d.getDay(), monProto, year7];
 }
+
 
 /** Snap "HH:MM" to the nearest lower 15-minute mark (00,15,30,45). */
 function snapTo15(hhmm: string): string {
@@ -151,10 +157,10 @@ export default function SmartSchedulingPanel(props: { defaultTime?: string }) {
       }
 
       const take: Row[] = sch.entries.slice(0, MAX_ROWS).map((e) => {
-        // time7: [year, mon, mday, hour, min, sec, wday]
-        const hh = e.time7[3] ?? 20;
-        const mm = e.time7[4] ?? 0;
-        const t = snapTo15(`${pad2(hh)}:${pad2(mm)}`); // snap just in case
+        // time7 (FW): [sec, min, hour, mday, wday, month, year]
+        const hh = e.time7[2] ?? 20;
+        const mm = e.time7[1] ?? 0;
+        const t = snapTo15(`${pad2(hh)}:${pad2(mm)}`);
         const k: IntensityKey = CODE_TO_INT[e.intensity2b] ?? "Medium";
         return { id: uuid(), time: t, intensity: k };
       });

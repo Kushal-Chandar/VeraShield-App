@@ -13,7 +13,7 @@ interface TimeSettingsProps {
   onTimeChange: (time: string) => void;
 }
 
-const DISPLAY_TICK_MS = 1000;          // update the on-screen clock every second
+const DISPLAY_TICK_MS = 1000;          // update on-screen clock every second
 const DEVICE_SYNC_TICK_MS = 60_000;    // push to device every 60s when auto-sync is ON
 
 function applyTimeToDate(base: Date, hhmm: string): Date {
@@ -25,15 +25,33 @@ function applyTimeToDate(base: Date, hhmm: string): Date {
   return d;
 }
 
+/* ---------- tiny sticky state helper (local to this file) ---------- */
+function useStickyState<T>(key: string, initial: T) {
+  const [value, setValue] = useState<T>(() => {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw != null ? (JSON.parse(raw) as T) : initial;
+    } catch {
+      return initial;
+    }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch { }
+  }, [key, value]);
+  return [value, setValue] as const;
+}
+
 const TimeSettings = ({ currentTime, onTimeChange }: TimeSettingsProps) => {
-  const [manualTime, setManualTime] = useState(currentTime);
-  const [isAutoSync, setIsAutoSync] = useState(true);
+  // Persist across unmounts/tab switches
+  const [isAutoSync, setIsAutoSync] = useStickyState<boolean>("verashield:autoSync", true);
+  const [manualTime, setManualTime] = useStickyState<string>("verashield:manualTime", currentTime);
+
   const [isConnected, setIsConnected] = useState<boolean>(bluetoothService.isDeviceConnected());
 
   const displayTimerRef = useRef<number | null>(null);
   const deviceTimerRef = useRef<number | null>(null);
 
-  // NEW: if user set time while disconnected, push once on next connect
+  // If user set time while disconnected, push once on next connect
   const pendingManualPushRef = useRef(false);
 
   const { toast } = useToast();
@@ -45,9 +63,14 @@ const TimeSettings = ({ currentTime, onTimeChange }: TimeSettingsProps) => {
     return () => { try { unsubscribe?.(); } catch { } };
   }, []);
 
-  // keep local manual input synced if parent currentTime changes (and we're auto-syncing)
+  // On first mount or when parent currentTime changes:
+  // - If Auto Sync is ON, mirror parent's currentTime into manualTime (so input matches display).
+  // - If Auto Sync is OFF, DO NOT overwrite user's manualTime.
   useEffect(() => {
-    if (isAutoSync) setManualTime(currentTime);
+    if (isAutoSync) {
+      setManualTime(currentTime);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentTime, isAutoSync]);
 
   // Tick: update on-screen clock each second (no BLE)
@@ -57,14 +80,15 @@ const TimeSettings = ({ currentTime, onTimeChange }: TimeSettingsProps) => {
       const now = new Date().toLocaleTimeString("en-US", {
         hour12: false, hour: "2-digit", minute: "2-digit",
       });
-      onTimeChange(now);       // parent display state
-      setManualTime(now);      // keep input in sync
+      // keep parent & local input in sync while Auto Sync is ON
+      onTimeChange(now);
+      setManualTime(now);
     }, DISPLAY_TICK_MS) as unknown as number;
     return () => {
       if (displayTimerRef.current) window.clearInterval(displayTimerRef.current);
       displayTimerRef.current = null;
     };
-  }, [isAutoSync, onTimeChange]);
+  }, [isAutoSync, onTimeChange, setManualTime]);
 
   // Push to device on an interval (when auto-sync is ON and connected)
   useEffect(() => {
@@ -90,7 +114,7 @@ const TimeSettings = ({ currentTime, onTimeChange }: TimeSettingsProps) => {
     deviceTimerRef.current = null;
   }, [isAutoSync, isConnected]);
 
-  // NEW: if in manual mode and a manual push was queued while offline, push once on connect
+  // If in manual mode and a manual push was queued while offline, push once on connect
   useEffect(() => {
     async function pushIfPending() {
       if (!isAutoSync && isConnected && pendingManualPushRef.current) {
@@ -121,7 +145,7 @@ const TimeSettings = ({ currentTime, onTimeChange }: TimeSettingsProps) => {
 
     onTimeChange(sanitizedTime);
     setManualTime(sanitizedTime);
-    setIsAutoSync(false); // manual mode
+    setIsAutoSync(false); // enter manual mode and persist it
 
     if (!isConnected) {
       pendingManualPushRef.current = true; // queue a one-shot sync on next connection
@@ -139,7 +163,7 @@ const TimeSettings = ({ currentTime, onTimeChange }: TimeSettingsProps) => {
   };
 
   const handleAutoSync = async () => {
-    setIsAutoSync(true);
+    setIsAutoSync(true); // persist
 
     const nowStr = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" });
     onTimeChange(nowStr);

@@ -47,13 +47,43 @@ function isDisconnecty(err: unknown): boolean {
   );
 }
 
+/** Very small 1-at-a-time queue for GATT ops (prevents “post-connect stampede”). */
+class OpQueue {
+  private chain: Promise<unknown> = Promise.resolve();
+  run<T>(fn: () => Promise<T>, gapMs = 120): Promise<T> {
+    const exec = async () => {
+      try {
+        const out = await fn();
+        // small gap to give the OS stack breathing room
+        if (gapMs > 0) await new Promise(r => setTimeout(r, gapMs));
+        return out;
+      } catch (e) {
+        if (gapMs > 0) await new Promise(r => setTimeout(r, gapMs));
+        throw e;
+      }
+    };
+    const next = this.chain.then(exec, exec);
+    this.chain = next.then(
+      () => undefined,
+      () => undefined
+    );
+    return next;
+  }
+}
+
 class CompatBluetoothService {
-  initialize() {
-    return coreBT.initialize();
+  /** Cached connection state for instant reads in hook initializers. */
+  private _connected = false;
+  /** Public sync snapshot (don’t use this to *decide* to do BLE; subscribe + await instead). */
+  get isConnectedCached(): boolean { return this._connected; }
+
+  private q = new OpQueue();
+
+  initialize(): Promise<void> {
+    return toPromise(coreBT.initialize()) as Promise<void>;
   }
 
-  requestPermissions() {
-    // Some platforms don’t expose this; normalize to a Promise.
+  requestPermissions(): Promise<void | undefined> {
     return toPromise(coreBT.requestPermissions?.());
   }
 
@@ -77,48 +107,79 @@ class CompatBluetoothService {
     }
 
     // Last resort: if we’re connected, BT must be enabled.
-    const connected = await toPromise(coreBT.isDeviceConnected());
+    const connected = await this.isDeviceConnected();
     return !!connected;
   }
 
-  scanForDevices() { return coreBT.scanForDevices(); }
+  scanForDevices(...args: any[]) {
+    // Scanning can be chatty; let core handle rate limiting.
+    return coreBT.scanForDevices(...args);
+  }
+
   isMachharDevice(deviceId: string) { return coreBT.isMachharDevice(deviceId); }
-  connect(device: { id: string; name?: string | null }) { return coreBT.connect(device); }
-  disconnect() { return coreBT.disconnect(); }
 
+  /** Connect is queued to avoid overlapping with any in-flight reads/writes. */
+  async connect(device: { id: string; name?: string | null }): Promise<void> {
+    await this.q.run(async () => {
+      await toPromise(coreBT.connect(device));
+      // After connect, update cache by probing once.
+      this._connected = !!(await this.isDeviceConnected());
+    }, 250); // slightly larger post-connect gap
+  }
+
+  async disconnect(): Promise<void> {
+    await this.q.run(async () => {
+      await toPromise(coreBT.disconnect());
+      this._connected = false;
+    }, 0);
+  }
+
+  /** Always returns a Promise and refreshes the cached snapshot. */
   async isDeviceConnected(): Promise<boolean> {
-    const v = await toPromise(coreBT.isDeviceConnected());
-    return !!v;
+    const v = await this.q.run(async () => {
+      const res = await toPromise(coreBT.isDeviceConnected());
+      return !!res;
+    }, 0);
+    this._connected = v;
+    return v;
   }
 
+  /** Normalize any payload to boolean for app code and keep cache in sync. */
   onConnectionChange(cb: (v: boolean) => void) {
-    // Normalize any payload to boolean for app code.
-    return coreBT.onConnectionChange((v: any) => cb(!!v));
+    return coreBT.onConnectionChange((v: any) => {
+      const b = !!v;
+      this._connected = b;
+      cb(b);
+    });
   }
 
-  /** App-facing reads with soft-fail semantics for optional services. */
+  /** App-facing reads with soft-fail semantics for optional services, serialized. */
   async readDeviceData(): Promise<DeviceData> {
-    const [bRes, dRes] = await Promise.allSettled([
-      toPromise(coreBT.getBatteryLevel?.()),
-      toPromise(coreBT.getDeviceInfo?.()),
-    ]);
+    return this.q.run(async () => {
+      const [bRes, dRes] = await Promise.allSettled([
+        toPromise(coreBT.getBatteryLevel?.()),
+        toPromise(coreBT.getDeviceInfo?.()),
+      ]);
 
-    // Soft fallbacks unless the error truly indicates a disconnect.
-    let batteryLevel: number | undefined = undefined;
-    if (bRes.status === "fulfilled") {
-      batteryLevel = typeof bRes.value === "number" ? bRes.value : undefined;
-    } else if (isDisconnecty(bRes.reason)) {
-      throw bRes.reason;
-    }
+      // Soft fallbacks unless the error truly indicates a disconnect.
+      let batteryLevel: number | undefined = undefined;
+      if (bRes.status === "fulfilled") {
+        batteryLevel = typeof bRes.value === "number" ? bRes.value : undefined;
+      } else if (isDisconnecty(bRes.reason)) {
+        this._connected = false;
+        throw bRes.reason;
+      }
 
-    let deviceInfo: DeviceData["deviceInfo"] | undefined = undefined;
-    if (dRes.status === "fulfilled") {
-      deviceInfo = dRes.value;
-    } else if (isDisconnecty(dRes.reason)) {
-      throw dRes.reason;
-    }
+      let deviceInfo: DeviceData["deviceInfo"] | undefined = undefined;
+      if (dRes.status === "fulfilled") {
+        deviceInfo = dRes.value;
+      } else if (isDisconnecty(dRes.reason)) {
+        this._connected = false;
+        throw dRes.reason;
+      }
 
-    return { batteryLevel, deviceInfo };
+      return { batteryLevel, deviceInfo };
+    });
   }
 
   /** Alias retained for existing callers. */

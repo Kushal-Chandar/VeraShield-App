@@ -79,7 +79,7 @@ const Index = () => {
           <p className="text-gray-600">Smart Mosquito Repellent Control</p>
         </div>
 
-        <Tabs defaultValue="control" className="w-full">
+        <Tabs defaultValue="control" className="w-full" >
           <TabsList className="grid w-full grid-cols-2 mb-6">
             <TabsTrigger value="control" className="flex items-center gap-1">
               <Zap className="w-4 h-4" />

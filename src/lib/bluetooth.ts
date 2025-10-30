@@ -230,6 +230,7 @@ class MachharBluetoothServiceImpl implements BluetoothService {
             await this.disconnect().catch(() => { });
         }
 
+        // 1) Connect
         await withTimeout(
             BleClient.connect(device.id, (_disconnectedDeviceId?: string) => {
                 // disconnect callback
@@ -243,38 +244,70 @@ class MachharBluetoothServiceImpl implements BluetoothService {
         this.connected = { deviceId: device.id, name: device.name ?? null };
         this.notifyConnectionChange();
 
-        // allow services to settle
-        await sleep(300);
+        // Give stack a breath
+        await sleep(200);
 
+        // 2) Try to improve link BEFORE we start doing work
+        //    - Request high connection priority (Android only)
+        //    - Negotiate MTU (Android only; iOS auto-negotiates and provides ~185 MTU / ~182 payload)
+        this.currentMtu = 23; // default ATT MTU if everything fails
+
+        const tryRequestConnectionPriority = async () => {
+            try {
+                // @ts-ignore (Android only in most plugins)
+                if (typeof (BleClient as any).requestConnectionPriority === "function") {
+                    // @ts-ignore
+                    await (BleClient as any).requestConnectionPriority({ deviceId: device.id, priority: "high" });
+                }
+            } catch { /* ignore */ }
+        };
+
+        const tryRequestMtu = async (mtu: number) => {
+            try {
+                // Correct signature for capacitor-community/bluetooth-le:
+                // requestMtu({ deviceId, mtu })
+                // @ts-ignore
+                if (typeof (BleClient as any).requestMtu === "function") {
+                    // @ts-ignore
+                    await (BleClient as any).requestMtu({ deviceId: device.id, mtu });
+                    this.currentMtu = mtu; // assume success; many stacks don't expose a getter
+                    // If a getter exists, prefer it
+                    try {
+                        // @ts-ignore
+                        if (typeof (BleClient as any).getMtu === "function") {
+                            // @ts-ignore
+                            this.currentMtu = await (BleClient as any).getMtu({ deviceId: device.id });
+                        }
+                    } catch { /* ignore getter issues */ }
+                }
+            } catch {
+                // leave currentMtu as-is on failure
+            }
+        };
+
+        await tryRequestConnectionPriority();
+        // First attempt full 517 (Android 8+/DLE capable phones + nRF can often do this)
+        await tryRequestMtu(517);
+
+        // If still small, brief pause and try a more widely-supported 247
+        if ((this.currentMtu ?? 23) <= 23) {
+            await sleep(200);
+            await tryRequestMtu(247);
+        }
+
+        // Finalize payload limit (ATT payload = MTU - 3)
+        this.currentPayloadLimit = Math.max(20, (this.currentMtu ?? 23) - 3);
+
+        // 3) Now verify it’s our device (service discovery, etc.)
+        // Some stacks auto-run discovery on first GATT op; this is fine after MTU negotiation.
+        await sleep(150);
         const ok = await this.isMachharDevice(device.id);
         if (!ok) {
             await this.disconnect().catch(() => { });
             throw new Error("Machhar service not found on device");
         }
-
-        this.currentMtu = 23; // default ATT MTU if request fails
-        try {
-            // Some plugin versions expose requestMtu(deviceId, mtu)
-            // @ts-ignore
-            if (typeof (BleClient as any).requestMtu === "function") {
-                // @ts-ignore
-                const wanted = 247; // common max on Android
-                // @ts-ignore
-                await (BleClient as any).requestMtu(device.id, wanted);
-                // @ts-ignore: if getMtu exists, prefer real value
-                if (typeof (BleClient as any).getMtu === "function") {
-                    // @ts-ignore
-                    this.currentMtu = await (BleClient as any).getMtu(device.id);
-                } else {
-                    // assume success if no getter (platforms often grant ~247)
-                    this.currentMtu = wanted;
-                }
-            }
-        } catch {
-            // keep default 23 if request fails
-        }
-        this.currentPayloadLimit = Math.max(20, (this.currentMtu ?? 23) - 3); // ATT payload = MTU-3
     }
+
 
     async disconnect(): Promise<void> {
         if (!this.connected) return;
@@ -368,14 +401,15 @@ class MachharBluetoothServiceImpl implements BluetoothService {
 
     async syncTimeFromDate(d: Date): Promise<void> {
         const y = d.getFullYear();
-        const year7 = clamp(y - 2000, 0, 255);
+        const year7 = clamp(y - 1900, 0, 255);
         const month7 = clamp(d.getMonth(), 0, 11); // firmware expects 0..11
         const mday = clamp(d.getDate(), 1, 31);
         const hour = clamp(d.getHours(), 0, 23);
         const min = clamp(d.getMinutes(), 0, 59);
         const sec = clamp(d.getSeconds(), 0, 59);
         const wday = clamp(d.getDay(), 0, 6);
-        const time7 = [year7, month7, mday, hour, min, sec, wday];
+        // const time7 = [year7, month7, mday, hour, min, sec, wday];
+        const time7 = [sec, min, hour, mday, wday, month7, year7];
         await this.syncTimeRaw(time7);
     }
 
