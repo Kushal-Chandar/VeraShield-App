@@ -29,7 +29,7 @@ export interface DeviceInfo {
 }
 
 export interface ScheduleEntry {
-    time7: number[]; // length 7
+    time7: number[]; // length 7 per: [sec,min,hour,mday,wday,mon(0-11),year-1900]
     intensity2b: number; // 0..3
 }
 export interface ParsedSchedule {
@@ -38,12 +38,12 @@ export interface ParsedSchedule {
 }
 
 export interface StatsEntry {
-    time7: number[];
+    time7: number[]; // same 7-byte layout as above
     intensity2b: number;
 }
 export interface ParsedStats {
-    total: number;
-    window: number;
+    total: number;   // total available on device
+    window: number;  // how many entries THIS read returned (effective_want)
     entries: StatsEntry[];
 }
 
@@ -115,7 +115,7 @@ class MachharBluetoothServiceImpl implements BluetoothService {
     private readonly scanTimeoutMs = 10_000;
     private readonly connectTimeoutMs = 15_000;
     private currentMtu: number | undefined;
-    /** For writes: maximum payload we should send (ATT payload = MTU-3) */
+    /** For writes: maximum payload we should send (ATT write payload = MTU-3) */
     private currentPayloadLimit: number | undefined;
 
     async initialize(): Promise<void> {
@@ -130,7 +130,6 @@ class MachharBluetoothServiceImpl implements BluetoothService {
 
     async requestPermissions(): Promise<void> {
         await this.initialize();
-        // best-effort - some environments expose permission helpers; ignore failures
         try {
             // @ts-ignore
             if (typeof (BleClient as any).requestLEPermissions === "function") {
@@ -182,7 +181,6 @@ class MachharBluetoothServiceImpl implements BluetoothService {
                 const rawName = getName(res);
                 if (!rawName) return; // skip nameless advertisements
 
-                // Filter to devices whose name includes "MACHHAR"
                 if (!rawName.toUpperCase().includes(WANT)) return;
 
                 const prev = results.get(id);
@@ -215,9 +213,7 @@ class MachharBluetoothServiceImpl implements BluetoothService {
     async isMachharDevice(deviceId: string): Promise<boolean> {
         try {
             const services = await BleClient.getServices(deviceId);
-            return services.some(
-                (s) => (s.uuid ?? "").toString().toLowerCase() === MACHHAR_SERVICE_UUID.toLowerCase()
-            );
+            return services.some((s) => (s.uuid ?? "").toString().toLowerCase() === MACHHAR_SERVICE_UUID.toLowerCase());
         } catch {
             return false;
         }
@@ -233,7 +229,6 @@ class MachharBluetoothServiceImpl implements BluetoothService {
         // 1) Connect
         await withTimeout(
             BleClient.connect(device.id, (_disconnectedDeviceId?: string) => {
-                // disconnect callback
                 this.connected = null;
                 this.notifyConnectionChange();
             }),
@@ -244,62 +239,51 @@ class MachharBluetoothServiceImpl implements BluetoothService {
         this.connected = { deviceId: device.id, name: device.name ?? null };
         this.notifyConnectionChange();
 
-        // Give stack a breath
         await sleep(200);
 
-        // 2) Try to improve link BEFORE we start doing work
-        //    - Request high connection priority (Android only)
-        //    - Negotiate MTU (Android only; iOS auto-negotiates and provides ~185 MTU / ~182 payload)
-        this.currentMtu = 23; // default ATT MTU if everything fails
+        // 2) Try to improve link (Android: priority + MTU)
+        this.currentMtu = 23; // default ATT MTU
 
         const tryRequestConnectionPriority = async () => {
             try {
-                // @ts-ignore (Android only in most plugins)
+                // @ts-ignore
                 if (typeof (BleClient as any).requestConnectionPriority === "function") {
                     // @ts-ignore
                     await (BleClient as any).requestConnectionPriority({ deviceId: device.id, priority: "high" });
                 }
-            } catch { /* ignore */ }
+            } catch { }
         };
 
         const tryRequestMtu = async (mtu: number) => {
             try {
-                // Correct signature for capacitor-community/bluetooth-le:
-                // requestMtu({ deviceId, mtu })
                 // @ts-ignore
                 if (typeof (BleClient as any).requestMtu === "function") {
                     // @ts-ignore
                     await (BleClient as any).requestMtu({ deviceId: device.id, mtu });
-                    this.currentMtu = mtu; // assume success; many stacks don't expose a getter
-                    // If a getter exists, prefer it
+                    this.currentMtu = mtu;
                     try {
                         // @ts-ignore
                         if (typeof (BleClient as any).getMtu === "function") {
                             // @ts-ignore
                             this.currentMtu = await (BleClient as any).getMtu({ deviceId: device.id });
                         }
-                    } catch { /* ignore getter issues */ }
+                    } catch { }
                 }
             } catch {
-                // leave currentMtu as-is on failure
+                // leave as-is
             }
         };
 
         await tryRequestConnectionPriority();
-        // First attempt full 517 (Android 8+/DLE capable phones + nRF can often do this)
         await tryRequestMtu(517);
-
-        // If still small, brief pause and try a more widely-supported 247
         if ((this.currentMtu ?? 23) <= 23) {
             await sleep(200);
             await tryRequestMtu(247);
         }
 
-        // Finalize payload limit (ATT payload = MTU - 3)
         this.currentPayloadLimit = Math.max(20, (this.currentMtu ?? 23) - 3);
 
-        // 3) Now verify it’s our device (service discovery, etc.)
-        // Some stacks auto-run discovery on first GATT op; this is fine after MTU negotiation.
+        // 3) Verify our service exists
         await sleep(150);
         const ok = await this.isMachharDevice(device.id);
         if (!ok) {
@@ -308,12 +292,10 @@ class MachharBluetoothServiceImpl implements BluetoothService {
         }
     }
 
-
     async disconnect(): Promise<void> {
         if (!this.connected) return;
         const id = this.connected.deviceId;
         try {
-            // Removed: writing 0xFF to remote-spray here could trigger an unintended action.
             await BleClient.disconnect(id);
         } catch {
             // ignore
@@ -335,42 +317,70 @@ class MachharBluetoothServiceImpl implements BluetoothService {
     private ensureConnected(): void {
         if (!this.connected) throw new Error("Device not connected");
     }
-
     private async readCharacteristic(service: string, characteristic: string): Promise<number[]> {
         this.ensureConnected();
-        try {
-            const dv = await BleClient.read(this.connected!.deviceId, service, characteristic);
-            return dataViewToNumbers(dv);
-        } catch (err) {
-            // clear state if read fails due to disconnect
+
+        // Small helper: detect hard disconnect errors
+        const looksDisconnected = (err: any) => {
+            const m = String(err?.message ?? err ?? "").toLowerCase();
+            return m.includes("disconnected") || m.includes("not connected") || m.includes("gatt 133");
+        };
+
+        const maxAttempts = 4;
+        let lastErr: any;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                const dv = await BleClient.read(this.connected!.deviceId, service, characteristic);
+                return dataViewToNumbers(dv);
+            } catch (err) {
+                lastErr = err;
+                // If this is a hard disconnect, reflect it immediately
+                if (looksDisconnected(err)) {
+                    this.connected = null;
+                    this.notifyConnectionChange();
+                    throw err;
+                }
+                // Otherwise, soft backoff and retry
+                const backoffMs = 40 * attempt; // 40ms, 80ms, 120ms, 160ms
+                await sleep(backoffMs);
+                continue;
+            }
+        }
+
+        // After retries, treat as fatal. If at this point it's a disconnect-like error, clear state.
+        if (String(lastErr?.message ?? "").toLowerCase().includes("disconnected")) {
             this.connected = null;
             this.notifyConnectionChange();
-            throw err;
         }
+        throw lastErr ?? new Error("Read failed");
     }
+
 
     private async writeCharacteristic(service: string, characteristic: string, bytes: number[]): Promise<void> {
         this.ensureConnected();
+        const dv = numbersToDataView(bytes);
         try {
-            const dv = numbersToDataView(bytes);
             await BleClient.write(this.connected!.deviceId, service, characteristic, dv);
         } catch (err) {
-            this.connected = null;
-            this.notifyConnectionChange();
+            const msg = String(err?.message ?? "").toLowerCase();
+            if (msg.includes("disconnected") || msg.includes("not connected")) {
+                this.connected = null;
+                this.notifyConnectionChange();
+            }
             throw err;
         }
     }
 
+
     private parseSchedulePayload(raw: number[]): ParsedSchedule {
         if (!Array.isArray(raw) || raw.length < 1) return { count: 0, entries: [] };
-        let countFromRaw = raw[0] ?? 0;
+        const advertisedCount = raw[0] ?? 0;
+
+        // Entries that actually arrived in this PDU:
+        const arrived = Math.max(0, Math.floor((raw.length - 1) / 8));
+        const n = Math.min(advertisedCount, arrived);
+
         const entries: ScheduleEntry[] = [];
-
-        // Expected length by count
-        const expectedLen = 1 + countFromRaw * 8;
-        const arrivedEntries = Math.max(0, Math.floor((raw.length - 1) / 8));
-        const n = Math.min(countFromRaw, arrivedEntries);
-
         for (let i = 0; i < n; i++) {
             const base = 1 + i * 8;
             const time7 = raw.slice(base, base + 7);
@@ -380,14 +390,14 @@ class MachharBluetoothServiceImpl implements BluetoothService {
         return { count: n, entries };
     }
 
+    /** Parse stats PDU from firmware: [total, want] + want*(7+1) bytes. */
     private parseStatsPayload(raw: number[]): ParsedStats {
         if (!Array.isArray(raw) || raw.length < 2) return { total: 0, window: 0, entries: [] };
         const total = raw[0] ?? 0;
-        const windowFromRaw = raw[1] ?? 0;
+        const wantHdr = raw[1] ?? 0;
 
-        // How many full 8-byte entries actually arrived?
         const arrived = Math.max(0, Math.floor((raw.length - 2) / 8));
-        const n = Math.min(windowFromRaw, arrived);
+        const n = Math.min(wantHdr, arrived);
 
         const entries: StatsEntry[] = [];
         for (let i = 0; i < n; i++) {
@@ -408,18 +418,15 @@ class MachharBluetoothServiceImpl implements BluetoothService {
         const min = clamp(d.getMinutes(), 0, 59);
         const sec = clamp(d.getSeconds(), 0, 59);
         const wday = clamp(d.getDay(), 0, 6);
-        // const time7 = [year7, month7, mday, hour, min, sec, wday];
+
+        // Firmware tm_from_7: [sec,min,hour,mday,wday,mon(0..11),year_since_1900]
         const time7 = [sec, min, hour, mday, wday, month7, year7];
         await this.syncTimeRaw(time7);
     }
 
     async syncTimeRaw(time7: number[]): Promise<void> {
         if (!Array.isArray(time7) || time7.length !== 7) throw new Error("time7 must be array of 7 bytes");
-        await this.writeCharacteristic(
-            MACHHAR_SERVICE_UUID,
-            MACHHAR_GADI_SYNC_UUID,
-            time7.map((n) => clamp(n, 0, 255))
-        );
+        await this.writeCharacteristic(MACHHAR_SERVICE_UUID, MACHHAR_GADI_SYNC_UUID, time7.map((n) => clamp(n, 0, 255)));
     }
 
     async readSchedule(): Promise<ParsedSchedule> {
@@ -463,32 +470,46 @@ class MachharBluetoothServiceImpl implements BluetoothService {
         await this.writeCharacteristic(MACHHAR_SERVICE_UUID, MACHHAR_SCHEDULING_UUID, bytes);
     }
 
+    /**
+     * Reads one stats "slice".
+     * - We write control: [start, window]
+     * - Device returns: [total, want_effective] + want_effective * 8 bytes
+     *   (8 = 7 time bytes + 1 intensity)
+     * NOTE: If window=0, FW will cap internally (to <=63 and to MTU-fit).
+     */
     async readStatistics(start: number, window: number): Promise<ParsedStats> {
-        // NOTE:
-        // - Window 0 is allowed as a FW-side "max allowed" shortcut.
-        // - Otherwise we cap to 1..63 and, optionally, to a single-PDU fit given current MTU.
-
         const startB = clamp(start, 0, 255);
 
+        // Compute a single-PDU safe window for READ CHARACTERISTIC VALUE (no Long Read).
+        // Max payload per read is (MTU - 1). Firmware header = 2 bytes. Each stat entry = 8 bytes.
         const mtu = this.currentMtu ?? 23;
-        // For a single Read Characteristic Value PDU, max payload is (MTU - 1).
-        // With a 2-byte header, entries are 8 bytes each.
-        const maxEntriesOneRead = Math.max(0, Math.floor(((mtu - 1) - 2) / 8));
+        const maxEntriesOneRead = Math.max(1, Math.floor(((mtu - 1) - 2) / 8)); // >=1
 
-        let winB: number;
-        if (window === 0) {
-            // Let FW decide maximum (still capped internally to <=63 and available entries).
-            winB = 0;
-        } else {
-            // Cap to [1..63]; also optionally cap to what fits in one read if that limit is >0.
-            const capped = clamp(window, 1, 63);
-            winB = maxEntriesOneRead > 0 ? clamp(Math.min(capped, maxEntriesOneRead), 1, 63) : capped;
-        }
+        // If caller asked for 0 (= “as much as possible”), we cap to one-PDU safe size.
+        // If caller passed N, we still cap to one-PDU safe size and FW cap (<=63).
+        let winB = window === 0 ? maxEntriesOneRead : Math.min(clamp(window, 1, 63), maxEntriesOneRead);
 
-        // write control then read
+        // 1) Control write
         await this.writeCharacteristic(MACHHAR_SERVICE_UUID, MACHHAR_STATISTICS_UUID, [startB, winB]);
-        const raw = await this.readCharacteristic(MACHHAR_SERVICE_UUID, MACHHAR_STATISTICS_UUID);
-        return this.parseStatsPayload(raw);
+
+        // 2) Short settle delay (some stacks need a breath to prepare value)
+        await sleep(60);
+
+        // 3) Read once (should fit in a single PDU)
+        try {
+            const raw = await this.readCharacteristic(MACHHAR_SERVICE_UUID, MACHHAR_STATISTICS_UUID);
+            return this.parseStatsPayload(raw);
+        } catch (err) {
+            // Fallback: try a tiny window=2 to be extra conservative
+            try {
+                await this.writeCharacteristic(MACHHAR_SERVICE_UUID, MACHHAR_STATISTICS_UUID, [startB, 2]);
+                await sleep(60);
+                const raw2 = await this.readCharacteristic(MACHHAR_SERVICE_UUID, MACHHAR_STATISTICS_UUID);
+                return this.parseStatsPayload(raw2);
+            } catch {
+                throw err; // bubble original
+            }
+        }
     }
 
     async remoteSpray(state: number = 0x01): Promise<void> {

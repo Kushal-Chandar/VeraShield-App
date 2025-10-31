@@ -1,70 +1,85 @@
-// src/hooks/useFirmwareStats.ts
+// src/hooks/useFirmwareStats.tsx
 import { useCallback, useState } from "react";
-import bluetoothService, { ParsedStats } from "@/lib/bluetooth";
-import { TIMEFRAMES, TimeframeKey, time7ToDate } from "@/utils/statsUtils";
+import { bluetoothService } from "@/lib/bluetooth";
+import {
+  TIMEFRAMES,
+  TimeframeKey,
+  time7ToDate,
+  entryDurationSec,
+  cutoffDateForDays,
+} from "@/utils/statsUtils";
+
+type UiEntry = Record<string, any> & { t: Date; intensity: number; durationSec?: number };
 
 export function useFirmwareStats() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [lifetimeTotal, setLifetimeTotal] = useState(0);
-  const [entries, setEntries] = useState<{ t: Date; intensity: number }[]>([]);
-  const [tfKey, setTfKey] = useState<TimeframeKey>("30d");
+  const [entries, setEntries] = useState<UiEntry[]>([]);
+  const [tfKey, setTfKey] = useState<TimeframeKey>("all");
 
   const load = useCallback(async (key: TimeframeKey = tfKey) => {
-    setLoading(true); setError(null);
+    setLoading(true);
+    setError(null);
     try {
-      const tf = TIMEFRAMES.find(t => t.key === key)!;
-      const PAGE = 63;
+      const cutoff = cutoffDateForDays(TIMEFRAMES.find(t => t.key === key)!.days);
+      const collected: UiEntry[] = [];
 
-      // Probe to get total
-      const probe = await bluetoothService.readStatistics(0, 1);
-      const total = probe?.total ?? 0;
+      // Ask FW for "as much as possible" per read by passing window=0 (it will cap by MTU).
+      // First slice from start=0 gives us both 'total' and the first batch of entries.
+      let start = 0;
+      let total = 0;
 
-      const cutoff = (() => {
-        if (tf.days === "all") return null;
-        const d = new Date();
-        d.setHours(0, 0, 0, 0);
-        d.setDate(d.getDate() - (tf.days as number) + 1);
-        return d;
-      })();
+      // ---- First slice
+      {
+        const slice = await bluetoothService.readStatistics(start, 0);
+        total = slice.total ?? 0;
 
-      const collected: { t: Date; intensity: number }[] = [];
+        const got = slice.window ?? (slice.entries?.length ?? 0);
+        for (let i = 0; i < got; i++) {
+          const raw = slice.entries[i];
+          const dt = time7ToDate(raw.time7);
+          if (!dt) continue;
 
-      // start at newest window and walk backwards
-      let start = total > PAGE ? total - PAGE : 0;
-      while (start >= 0) {
-        const page: ParsedStats = await bluetoothService.readStatistics(start, PAGE);
-        if (!page?.entries?.length) break;
+          const intensity = (raw.intensity2b ?? 0) & 0x03;
+          const durationSec = entryDurationSec({ ...raw, intensity2b: intensity });
 
-        for (const e of page.entries) {
-          const dt = time7ToDate(e.time7); if (!dt) continue;
-          const intensity = (e.intensity2b ?? 0) & 0x03;
-          if (!cutoff || dt >= cutoff) collected.push({ t: dt, intensity });
+          if (!cutoff || dt >= cutoff) {
+            collected.push({ ...raw, t: dt, intensity, durationSec });
+          }
         }
-
-        if (cutoff) {
-          const oldest = page.entries[0];
-          const oldestDt = oldest ? time7ToDate(oldest.time7) : null;
-          if (oldestDt && oldestDt < cutoff) break;
-        }
-
-        start -= PAGE;
-        if (start < 0) break;
+        start += got;
       }
 
-      setLifetimeTotal(total);
+      // ---- Remaining slices
+      while (start < total) {
+        const slice = await bluetoothService.readStatistics(start, 0); // 0 => FW decides effective window per MTU
+        const got = slice.window ?? (slice.entries?.length ?? 0);
+        if (got <= 0) break;
+
+        for (let i = 0; i < got; i++) {
+          const raw = slice.entries[i];
+          const dt = time7ToDate(raw.time7);
+          if (!dt) continue;
+
+          const intensity = (raw.intensity2b ?? 0) & 0x03;
+          const durationSec = entryDurationSec({ ...raw, intensity2b: intensity });
+
+          if (!cutoff || dt >= cutoff) {
+            collected.push({ ...raw, t: dt, intensity, durationSec });
+          }
+        }
+
+        start += got; // step by what we actually received
+      }
+
       setEntries(collected);
     } catch (e: any) {
       setError(e?.message || "Failed to load statistics");
-      setLifetimeTotal(0);
       setEntries([]);
     } finally {
       setLoading(false);
     }
   }, [tfKey]);
 
-  return {
-    loading, error, lifetimeTotal, entries,
-    tfKey, setTfKey, load,
-  };
+  return { loading, error, entries, tfKey, setTfKey, load };
 }

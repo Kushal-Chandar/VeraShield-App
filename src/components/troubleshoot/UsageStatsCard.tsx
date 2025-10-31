@@ -1,21 +1,37 @@
-// src/components/troubleshoot/UsageStatsCard.tsx
-import { useEffect } from "react";
+// src/components/UsageStatsCard.tsx
+import { useEffect, useMemo } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { TrendingUp, Droplets, Clock, RefreshCw, AlertTriangle } from "lucide-react";
-import { TIMEFRAMES, TimeframeKey, computeMetrics } from "@/utils/statsUtils";
+import { Clock, RefreshCw, AlertTriangle, TrendingUp } from "lucide-react";
 import { useFirmwareStats } from "@/hooks/useFirmwareStats";
+import { TIMEFRAMES, TimeframeKey } from "@/utils/statsUtils";
 
 export default function UsageStatsCard({ isConnected }: { isConnected: boolean }) {
-  const { loading, error, lifetimeTotal, entries, tfKey, setTfKey, load } = useFirmwareStats();
+  const { loading, error, entries, tfKey, setTfKey, load } = useFirmwareStats();
 
   useEffect(() => {
     if (isConnected) void load(tfKey);
   }, [isConnected, tfKey, load]);
 
-  const metrics = computeMetrics(entries);
+  const { totalSprays, sprayHours, lastUsed } = useMemo(() => {
+    let totalSec = 0;
+    let latest: Date | null = null;
+
+    for (const e of entries) {
+      const s = typeof e?.durationSec === "number" ? e.durationSec : 0;
+      totalSec += s;
+      const t = e?.t instanceof Date ? e.t : null;
+      if (t && (!latest || t > latest)) latest = t;
+    }
+
+    return {
+      totalSprays: entries.length,
+      sprayHours: +(totalSec / 3600).toFixed(2),
+      lastUsed: latest ? latest.toLocaleString() : "—",
+    };
+  }, [entries]);
 
   return (
     <Card className="bg-white/80 backdrop-blur-sm border-0 shadow-lg">
@@ -28,17 +44,32 @@ export default function UsageStatsCard({ isConnected }: { isConnected: boolean }
 
           <div className="flex gap-2">
             {TIMEFRAMES.map((t) => (
-              <Button key={t.key} size="sm" variant={tfKey === t.key ? "default" : "outline"} onClick={() => setTfKey(t.key as TimeframeKey)} disabled={!isConnected || loading}>
-                {t.key.toUpperCase()}
+              <Button
+                key={t.key}
+                size="sm"
+                variant={tfKey === (t.key as TimeframeKey) ? "default" : "outline"}
+                onClick={() => setTfKey(t.key as TimeframeKey)}
+                disabled={!isConnected || loading}
+              >
+                {t.label}
               </Button>
             ))}
-            <Button size="sm" variant="outline" onClick={() => load(tfKey)} disabled={!isConnected || loading}>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => load(tfKey)}
+              disabled={!isConnected || loading}
+              title="Refresh"
+            >
               <RefreshCw className="w-4 h-4" />
             </Button>
           </div>
         </div>
+
         <CardDescription>
-          {isConnected ? (error ? <span className="text-red-600">{error}</span> : "Computed from device events") : "Connect device to view usage"}
+          {isConnected
+            ? (error ? <span className="text-red-600">{error}</span> : `Filtered: ${TIMEFRAMES.find(t => t.key === tfKey)?.label}`)
+            : "Connect device to view usage"}
         </CardDescription>
       </CardHeader>
 
@@ -54,52 +85,25 @@ export default function UsageStatsCard({ isConnected }: { isConnected: boolean }
           <div className="text-sm text-gray-500">Loading stats…</div>
         ) : (
           <>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="p-3 bg-blue-50 rounded-lg border">
-                <div className="flex items-center gap-2 mb-1">
-                  <Droplets className="w-4 h-4 text-blue-600" />
-                  <p className="text-xs text-blue-700">Lifetime Sprays</p>
-                </div>
-                <p className="text-xl font-bold text-blue-800">{lifetimeTotal}</p>
-              </div>
-              <div className="p-3 bg-green-50 rounded-lg border">
-                <div className="flex items-center gap-2 mb-1">
-                  <Clock className="w-4 h-4 text-green-600" />
-                  <p className="text-xs text-green-700">Sprays in {TIMEFRAMES.find(t => t.key === tfKey)?.label}</p>
-                </div>
-                <p className="text-xl font-bold text-green-800">{metrics.totalSprays}</p>
-              </div>
+            {/* Total sprays (by active filter) */}
+            <div className="p-3 bg-green-50 rounded-lg border">
+              <p className="text-xs text-green-700 mb-1">Total Sprays ({TIMEFRAMES.find(t => t.key === tfKey)?.label})</p>
+              <p className="text-xl font-bold text-green-800">{totalSprays}</p>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
-              <div className="p-3 bg-purple-50 rounded-lg border">
-                <div className="text-xs text-purple-700 mb-1">Average per Day</div>
-                <div className="text-xl font-bold text-purple-800">{metrics.averageDaily}</div>
+            {/* Spray hours (by active filter) */}
+            <div className="p-3 bg-blue-50 rounded-lg border">
+              <div className="flex items-center gap-2 mb-1">
+                <Clock className="w-4 h-4 text-blue-600" />
+                <p className="text-xs text-blue-700">Spray Hours ({TIMEFRAMES.find(t => t.key === tfKey)?.label})</p>
               </div>
-              <div className="p-3 bg-amber-50 rounded-lg border">
-                <div className="text-xs text-amber-700 mb-1">Peak Hour</div>
-                <div className="text-xl font-bold text-amber-800">{metrics.peakHour}</div>
-              </div>
+              <p className="text-xl font-bold text-blue-800">{sprayHours} h</p>
             </div>
 
-            <div className="grid grid-cols-3 gap-2">
-              <div className="p-2 rounded border text-center">
-                <div className="text-xs text-gray-600">Low</div>
-                <div className="font-semibold">{metrics.intensityMix.low}</div>
-              </div>
-              <div className="p-2 rounded border text-center">
-                <div className="text-xs text-gray-600">Medium</div>
-                <div className="font-semibold">{metrics.intensityMix.medium}</div>
-              </div>
-              <div className="p-2 rounded border text-center">
-                <div className="text-xs text-gray-600">High</div>
-                <div className="font-semibold">{metrics.intensityMix.high}</div>
-              </div>
-            </div>
-
+            {/* Last sprayed at */}
             <div className="flex justify-between items-center">
-              <span className="text-sm text-gray-600">Last Used</span>
-              <Badge variant="outline">{metrics.lastUsed}</Badge>
+              <span className="text-sm text-gray-600">Last Sprayed At</span>
+              <Badge variant="outline">{lastUsed}</Badge>
             </div>
           </>
         )}

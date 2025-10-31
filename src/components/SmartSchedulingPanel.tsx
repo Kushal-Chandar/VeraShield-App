@@ -13,7 +13,7 @@ const INT_TO_CODE: Record<IntensityKey, 1 | 2 | 3> = { Low: 1, Medium: 2, High: 
 const CODE_TO_INT: Record<number, IntensityKey> = { 1: "Low", 2: "Medium", 3: "High" };
 
 type Row = { id: string; time: string; intensity: IntensityKey };
-const MAX_ROWS = 5;
+const MAX_ROWS = 2;
 
 /* ---------- Helpers ---------- */
 function pad2(n: number) { return String(n).padStart(2, "0"); }
