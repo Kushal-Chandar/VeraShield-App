@@ -41,7 +41,6 @@ function dateToTime7(d: Date): number[] {
   return [d.getSeconds(), d.getMinutes(), d.getHours(), d.getDate(), d.getDay(), monProto, year7];
 }
 
-
 /** Snap "HH:MM" to the nearest lower 15-minute mark (00,15,30,45). */
 function snapTo15(hhmm: string): string {
   const m = /^(\d{2}):(\d{2})$/.exec(hhmm);
@@ -151,8 +150,6 @@ export default function SmartSchedulingPanel(props: { defaultTime?: string }) {
       const sch = await BluetoothService.readSchedule();
       if (!sch?.count || !sch.entries?.length) {
         setSummary("No schedule entries on device");
-        // Reset to single default row if nothing on device (optional)
-        // setRows([{ id: uuid(), time: defaultHHMM, intensity: "Medium" }]);
         return;
       }
 
@@ -169,8 +166,10 @@ export default function SmartSchedulingPanel(props: { defaultTime?: string }) {
       setDirty(false);
       setSummary(`#${sch.count} on device; showing ${take.length}: ${listSummary(take)}`);
 
-      // Friendly feedback (won’t spam on mount)
-      toast({ title: "Schedule loaded", description: `Loaded ${take.length} entr${take.length > 1 ? "ies" : "y"} from device.` });
+      toast({
+        title: "Schedule loaded",
+        description: `Loaded ${take.length} entr${take.length > 1 ? "ies" : "y"} from device.`,
+      });
     } catch (err: any) {
       const msg = String(err?.message ?? "Could not read schedule");
       setSummary("Could not read schedule");
@@ -207,6 +206,19 @@ export default function SmartSchedulingPanel(props: { defaultTime?: string }) {
     setRows(prev => prev.map(r => (r.id === id ? { ...r, ...patch } : r)));
   }
 
+  // 🔴 NEW: warn when a row is set to High intensity
+  function handleIntensityChange(id: string, value: IntensityKey) {
+    setRow(id, { intensity: value });
+
+    if (value === "High") {
+      toast({
+        title: "⚠️ High intensity scheduled",
+        description: "High intensity sprays can be harmful for the environment. Use only when really needed.",
+        variant: "destructive",
+      });
+    }
+  }
+
   async function handleSave() {
     if (!isConnected) {
       toast({ title: "Device not connected", description: "Connect to save schedule", variant: "destructive" });
@@ -229,11 +241,23 @@ export default function SmartSchedulingPanel(props: { defaultTime?: string }) {
 
       await BluetoothService.writeSchedule(entries);
 
-      toast({ title: "Schedule saved", description: `Saved ${rows.length} entr${rows.length > 1 ? "ies" : "y"}: ${listSummary(rows)}` });
+      toast({
+        title: "Schedule saved",
+        description: `Saved ${rows.length} entr${rows.length > 1 ? "ies" : "y"}: ${listSummary(rows)}`,
+      });
+
+      // Optional: extra heads-up if any High is in the saved schedule
+      if (rows.some(r => r.intensity === "High")) {
+        toast({
+          title: "⚠️ High intensity in schedule",
+          description: "One or more scheduled sprays are set to High. This may be harmful for the environment.",
+          variant: "destructive",
+        });
+      }
+
       setSummary(`${rows.length} saved: ${listSummary(rows)}`);
       setDirty(false);
 
-      // After a successful write, read back to reflect FW’s canonical ordering/validation (optional but nice)
       await refreshFromDevice();
     } catch (e: any) {
       const msg = String(e?.message ?? "Could not write schedule to device");
@@ -279,6 +303,7 @@ export default function SmartSchedulingPanel(props: { defaultTime?: string }) {
           {rows.map((r, idx) => {
             const isDup = dupTimes.includes(r.time);
             const isOffGrid = !isOn15(r.time);
+            const isHigh = r.intensity === "High";
             return (
               <div key={r.id} className="flex items-end gap-2">
                 <div className="flex-1">
@@ -311,12 +336,19 @@ export default function SmartSchedulingPanel(props: { defaultTime?: string }) {
                     id={`int-${r.id}`}
                     className="w-full rounded-md border px-3 py-2 bg-white"
                     value={r.intensity}
-                    onChange={(e) => setRow(r.id, { intensity: e.target.value as IntensityKey })}
+                    onChange={(e) => handleIntensityChange(r.id, e.target.value as IntensityKey)}
                   >
                     <option value="Low">Low</option>
                     <option value="Medium">Medium</option>
                     <option value="High">High</option>
                   </select>
+
+                  {/* {isHigh && (
+                    <div className="flex items-center gap-1 text-xs text-red-600 mt-1">
+                      <AlertTriangle className="w-3 h-3" />
+                      <span>High intensity may be harmful for the environment.</span>
+                    </div>
+                  )} */}
                 </div>
 
                 <Button
@@ -356,7 +388,7 @@ export default function SmartSchedulingPanel(props: { defaultTime?: string }) {
         </div>
 
         <p className="text-xs text-gray-600">
-          • Up to 5 entries • Only 15-minute steps (:00, :15, :30, :45) • No duplicate times
+          • Up to 2 entries • Only 15-minute steps (:00, :15, :30, :45) • No duplicate times
           {dirty ? " • You have unsaved edits" : ""}
         </p>
       </CardContent>
