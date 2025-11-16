@@ -11,9 +11,11 @@ export default defineConfig(({ mode }) => ({
   plugins: [
     react()
   ],
+  base: '/VeraShield-App',  // includes the repo AND the extra segment
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
     },
+
   },
 }));
