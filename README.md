@@ -14,21 +14,27 @@ VeraShield is a mobile app for configuring and controlling the VeraShield smart 
 
 You can discover nearby devices, trigger sprays, set schedules, monitor battery and user statistics
 
----
+<strong>🔧 See what this app controls <strong>: 👉 [VeraShield firmware](https://github.com/Kushal-Chandar/VeraShield-Firmware)
+
 
 ## 🔗 Live demo and media
 
 - 👉 [Live demo](https://kushal-chandar.github.io/VeraShield-App/#/demo)
 - **Video walkthrough:**
 
+https://github.com/user-attachments/assets/c4ddcf43-1d32-47ae-b97d-a368c9ff5348
 
-- **Screenshots:**
-  - Quick Actions and Time Sync
-    ![VeraShield – Actions](./assets/time_settings.JPG)
-  - Device control and scheduling  
-    ![VeraShield – Scheduling](./assets/scheduling.JPG)
-  - Statistics
-    ![VeraShield – Statistics](./assets/statistics.JPG)
+## 📸 Screenshots
+
+<p align="center">
+  <img src="./assets/time_settings.JPG" alt="VeraShield – Actions" width="260" />
+  <img src="./assets/scheduling.JPG" alt="VeraShield – Scheduling" width="260" />
+  <img src="./assets/statistics.JPG" alt="VeraShield – Statistics" width="260" />
+</p>
+
+- **Quick Actions and Time Sync**
+- **Device control and scheduling**
+- **Statistics**
 
 ## 🧩 What this app does
 
