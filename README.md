@@ -10,6 +10,13 @@
 
 [![Live Demo](https://img.shields.io/badge/Live_Demo-Open-green)](https://kushal-chandar.github.io/VeraShield-App/#/demo)
 
+- [VeraShield – Smart Dispenser Companion App](#verashield--smart-dispenser-companion-app)
+  - [🔗 Live demo and media](#-live-demo-and-media)
+  - [📸 Screenshots](#-screenshots)
+  - [🧩 What this app does](#-what-this-app-does)
+  - [🛠 Tech stack](#-tech-stack)
+
+
 VeraShield is a mobile app for configuring and controlling the VeraShield smart spray dispenser over Bluetooth Low Energy (BLE).
 
 You can discover nearby devices, trigger sprays, set schedules, monitor battery and user statistics
