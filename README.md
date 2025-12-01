@@ -33,15 +33,23 @@ https://github.com/user-attachments/assets/c4ddcf43-1d32-47ae-b97d-a368c9ff5348
 
 ## 📸 Screenshots
 
-<p align="center">
-  <img src="./assets/time_settings.JPG" alt="VeraShield – Actions" width="260" />
-  <img src="./assets/scheduling.JPG" alt="VeraShield – Scheduling" width="260" />
-  <img src="./assets/statistics.JPG" alt="VeraShield – Statistics" width="260" />
-</p>
+<table>
+  <tr>
+    <td align="center">
+      <strong>Quick Actions and Time Sync</strong><br/>
+      <img src="assets/time_settings.JPG" alt="VeraShield – Actions" width="260"/>
+    </td>
+    <td align="center">
+      <strong>Device control and scheduling</strong><br/>
+      <img src="assets/scheduling.JPG" alt="VeraShield – Scheduling" width="260"/>
+    </td>
+    <td align="center">
+      <strong>Statistics</strong><br/>
+      <img src="assets/statistics.JPG" alt="VeraShield – Statistics" width="260"/>
+    </td>
+  </tr>
+</table>
 
-- **Quick Actions and Time Sync**
-- **Device control and scheduling**
-- **Statistics**
 
 ## 🧩 What this app does
 
